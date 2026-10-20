@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lirio de luz</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Pinyon+Script&display=swap">
+<style>
+/* Layout: lienzo de noche a pantalla completa con el lirio al centro; dedicatoria arriba. Un solo tema oscuro por decisión. */
+:root {
+  --noche: #070512;
+  --noche-baja: #140b2c;
+  --magenta: #ff6fd2;
+  --crema: #f6e9f7;
+  --f-script: "Pinyon Script", "Snell Roundhand", "Apple Chancery", cursive;
+  --f-body: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+[hidden] { display: none !important; }
+body {
+  background: radial-gradient(120% 90% at 50% 40%, var(--noche-baja) 0%, var(--noche) 70%);
+  color: var(--crema); font-family: var(--f-body); overflow: hidden;
+}
+#lienzo { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: pointer; touch-action: manipulation; }
+.dedicatoria {
+  position: fixed; left: 0; right: 0; pointer-events: none; text-align: center;
+  top: calc(env(safe-area-inset-top, 0px) + 4.5vh);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.dedicatoria h1 {
+  margin: 0; font-family: var(--f-script); font-weight: 400;
+  font-size: clamp(40px, 7vw, 72px); line-height: 1.05;
+  color: var(--crema); text-shadow: 0 0 24px rgba(255, 111, 210, 0.55);
+  text-wrap: balance; overflow-wrap: anywhere;
+}
+
+</style>
+</head>
+<body>
+
+<canvas id="lienzo" aria-label="Lirio animado hecho de partículas de luz. Toca para que vuelva a florecer."></canvas>
+
+<div class="dedicatoria"><h1 id="dedicatoria">Para ti</h1></div>
+
+<script src="https://cdn.jsdelivr.net/npm/brython@3.12.4/brython.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/brython@3.12.4/brython_stdlib.js"></script>
+
+<script type="text/python" id="lirio_py">
+# Lirio de luz — un lirio hecho de partículas, en Python (Brython)
+from browser import document, window, timer
+import math
+import random
+
+lienzo = document["lienzo"]
+ctx = lienzo.getContext("2d")
+reducir = window.matchMedia("(prefers-reduced-motion: reduce)").matches
+TAU = math.pi * 2
+DURACION = 1.4          # segundos que tarda cada partícula en llegar a su lugar
+P = {"W": 0, "H": 0, "dpr": 1, "S": 0, "cx": 0, "cy": 0, "base": 0}
+
+# Degradados de color (posición 0..1, color hex)
+DEGRADADOS = {
+    "petalo": [(0, "#6a1784"), (0.35, "#b52fb3"), (0.7, "#ff6fd2"), (1, "#ffe3f7")],
+    "tallo": [(0, "#1f9e64"), (1, "#8affc4")],
+    "hoja": [(0, "#22a85e"), (0.6, "#6fe39a"), (1, "#d4ffb0")],
+    "polen": [(0, "#ff7a2f"), (1, "#ffc46b")],
+    "filamento": [(0, "#ff9ad8"), (1, "#fff0fa")],
+    "suelo": [(0, "#3b2380"), (1, "#b79cff")],
+}
+PASOS = 10   # tonos por degradado (agrupa partículas para dibujar más rápido)
+
+
+def hex_rgb(h):
+    return int(h[1:3], 16), int(h[3:5], 16), int(h[5:7], 16)
+
+
+def tono(nombre, t):
+    stops = DEGRADADOS[nombre]
+    t = max(0.0, min(1.0, t))
+    for i in range(len(stops) - 1):
+        a, ca = stops[i]
+        b, cb = stops[i + 1]
+        if t <= b:
+            k = (t - a) / (b - a) if b > a else 0
+            r1, g1, b1 = hex_rgb(ca)
+            r2, g2, b2 = hex_rgb(cb)
+            return "rgb(%d,%d,%d)" % (r1 + (r2 - r1) * k, g1 + (g2 - g1) * k, b1 + (b2 - b1) * k)
+    return "rgb(%d,%d,%d)" % hex_rgb(stops[-1][1])
+
+
+grupos = {}      # "color|destello" -> [color, destello, partículas]
+estrellas = []
+polen_flotante = []
+estado = {"T": 0.0, "fin": 0.0, "cache": None, "ultimo": None}
+
+
+def agregar(paleta, t, x, y, retraso, inicio=None, tam=1.6):
+    idx = int(max(0, min(PASOS - 1, t * PASOS)))
+    color = tono(paleta, (idx + 0.5) / PASOS)
+    if inicio is None:
+        ang = random.uniform(0, TAU)
+        dist = random.uniform(60, 280)
+        inicio = (x + math.cos(ang) * dist, y + math.sin(ang) * dist)
+    destello = random.randrange(3)
+    clave = color + "|" + str(destello)
+    if clave not in grupos:
+        grupos[clave] = [color, destello, []]
+    grupos[clave][2].append((x, y, inicio[0], inicio[1], retraso, tam))
+    estado["fin"] = max(estado["fin"], retraso + DURACION)
+
+
+def curva(p0, p1, p2, t):
+    u = 1 - t
+    return (u * u * p0[0] + 2 * u * t * p1[0] + t * t * p2[0],
+            u * u * p0[1] + 2 * u * t * p1[1] + t * t * p2[1])
+
+
+def petalo(angulo, largo, ancho, caida, brillo, retraso, n):
+    cx, cy = P["cx"], P["cy"]
+    a = math.radians(angulo)
+    ca, sa = math.cos(a), math.sin(a)
+    for _ in range(n):
+        u = random.random() ** 0.8
+        perfil = math.sin(math.pi * min(1.0, u * 1.02)) ** 0.75
+        v = random.uniform(-1, 1)
+        if random.random() < 0.28:           # más partículas en el borde: contorno luminoso
+            v = math.copysign(random.uniform(0.82, 1.0), v)
+        lx = u * largo
+        ly = v * ancho * perfil
+        x = cx + lx * ca - ly * sa
+        y = cy + lx * sa + ly * ca + caida * u * u * largo
+        t = u * 0.75 + abs(v) * 0.25 + brillo + random.uniform(-0.08, 0.08)
+        inicio = (cx + random.uniform(-8, 8), cy + random.uniform(-8, 8))
+        agregar("petalo", t, x, y, retraso + u * 1.1, inicio, 1.7)
+
+
+def hoja(t_tallo, lado, largo, retraso, puntos_tallo):
+    bx, by = curva(*puntos_tallo, t_tallo)
+    a = math.radians(-155 if lado < 0 else -25)
+    ca, sa = math.cos(a), math.sin(a)
+    ancho = largo * 0.17
+    for _ in range(260):
+        u = random.random()
+        perfil = math.sin(math.pi * u) ** 0.9
+        v = random.uniform(-1, 1)
+        if random.random() < 0.2:
+            v = math.copysign(random.uniform(0.8, 1.0), v)
+        lx = u * largo
+        ly = v * ancho * perfil
+        x = bx + lx * ca - ly * sa
+        y = by + lx * sa + ly * ca + 0.25 * u * u * largo
+        agregar("hoja", u * 0.8 + random.uniform(0, 0.2), x, y, retraso + u * 0.6)
+
+
+def construir():
+    grupos.clear()
+    estado["fin"] = 0.0
+    S, cx, cy, base = P["S"], P["cx"], P["cy"], P["base"]
+    L = S * 0.27
+
+    # suelo: un montículo de partículas
+    for _ in range(650):
+        u = random.uniform(-1, 1)
+        alto = (1 - u * u) * S * 0.06
+        x = cx + u * S * 0.42
+        y = base - random.random() ** 1.6 * alto
+        agregar("suelo", 1 - (base - y) / (S * 0.06 + 1) * 0.2 - random.random() * 0.6, x, y, random.uniform(0, 0.8))
+
+    # tallo
+    p0 = (cx, base)
+    p1 = (cx - S * 0.05, (base + cy) / 2)
+    p2 = (cx + S * 0.01, cy + S * 0.02)
+    tallo = (p0, p1, p2)
+    for _ in range(460):
+        t = random.random()
+        x, y = curva(p0, p1, p2, t)
+        x += random.uniform(-2.6, 2.6)
+        agregar("tallo", t * 0.7 + random.random() * 0.3, x, y, 0.2 + t * 1.2)
+
+    # hojas (alternadas a los lados del tallo)
+    hoja(0.12, -1, S * 0.30, 0.9, tallo)
+    hoja(0.24, 1, S * 0.28, 1.1, tallo)
+    hoja(0.42, -1, S * 0.22, 1.3, tallo)
+    hoja(0.56, 1, S * 0.18, 1.5, tallo)
+
+    # pétalos: traseros más oscuros, delanteros más claros
+    petalo(-150, L * 1.0, L * 0.22, 0.10, -0.05, 2.0, 300)
+    petalo(-113, L * 0.95, L * 0.21, 0.02, -0.08, 2.1, 280)
+    petalo(-67, L * 0.95, L * 0.21, 0.02, -0.08, 2.1, 280)
+    petalo(-30, L * 1.0, L * 0.22, 0.10, -0.05, 2.0, 300)
+    petalo(-172, L * 0.92, L * 0.24, 0.32, 0.08, 2.3, 320)
+    petalo(-8, L * 0.92, L * 0.24, 0.32, 0.08, 2.3, 320)
+    petalo(30, L * 0.55, L * 0.26, 0.05, 0.18, 2.5, 260)
+
+    # estambres: filamento curvo con una antera de polen en la punta
+    for i, ang in enumerate([-140, -118, -98, -80, -60, -40]):
+        a = math.radians(ang)
+        largo = L * random.uniform(0.52, 0.66)
+        q0 = (cx, cy)
+        q2 = (cx + math.cos(a) * largo, cy + math.sin(a) * largo)
+        q1 = (cx + math.cos(a) * largo * 0.5, cy + math.sin(a) * largo * 0.5 - L * 0.12)
+        for _ in range(36):
+            t = random.random()
+            x, y = curva(q0, q1, q2, t)
+            agregar("filamento", t, x, y, 3.3 + t * 0.4, (cx, cy), 1.2)
+        for _ in range(20):
+            r = random.random() ** 0.5 * 4.5
+            g = random.uniform(0, TAU)
+            agregar("polen", random.random(), q2[0] + math.cos(g) * r * 1.5, q2[1] + math.sin(g) * r,
+                    3.7 + i * 0.05, (cx, cy), 1.8)
+
+    # convertir a lista para recorrerla rápido
+    estado["lista"] = list(grupos.values())
+
+    estrellas.clear()
+    for _ in range(90):
+        estrellas.append((random.random() * P["W"], random.random() * P["H"],
+                          random.uniform(0.4, 1.3), random.uniform(0, TAU), random.uniform(0.6, 2)))
+
+
+def ajustar(ev=None):
+    dpr = min(window.devicePixelRatio or 1, 2)
+    w, h = window.innerWidth, window.innerHeight
+    P.update({"W": w, "H": h, "dpr": dpr})
+    lienzo.setAttribute("width", str(int(w * dpr)))
+    lienzo.setAttribute("height", str(int(h * dpr)))
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    S = min(w * 1.1, h * 0.9)
+    P.update({"S": S, "cx": w / 2, "cy": h * 0.43, "base": h * 0.88})
+    construir()
+    reiniciar()
+
+
+def reiniciar(ev=None):
+    estado["T"] = estado["fin"] + 0.1 if reducir else 0.0
+    estado["cache"] = None
+
+
+def balanceo(T):
+    # el lirio se mece suavemente sobre la base del tallo
+    if reducir:
+        return
+    ang = math.sin(T * 0.7) * 0.018
+    ctx.translate(P["cx"], P["base"])
+    ctx.rotate(ang)
+    ctx.translate(-P["cx"], -P["base"])
+
+
+def hornear():
+    # cuando todas las partículas llegaron, se dibujan una vez en 3 capas
+    # y cada capa parpadea por su cuenta; así la animación sigue fluida
+    capas = []
+    for d in range(3):
+        c = window.document.createElement("canvas")
+        c.setAttribute("width", str(int(P["W"] * P["dpr"])))
+        c.setAttribute("height", str(int(P["H"] * P["dpr"])))
+        g = c.getContext("2d")
+        g.setTransform(P["dpr"], 0, 0, P["dpr"], 0, 0)
+        g.globalCompositeOperation = "lighter"
+        for grupo in estado["lista"]:
+            color, destello, parts = grupo[0], grupo[1], grupo[2]
+            if destello != d:
+                continue
+            g.fillStyle = color
+            for p in parts:
+                g.fillRect(p[0], p[1], p[5], p[5])
+        capas.append(c)
+    estado["cache"] = capas
+
+
+def circulos(T):
+    S, cx, cy = P["S"], P["cx"], P["cy"]
+    aparecer = min(1.0, T / 2.0)
+    ctx.save()
+    ctx.globalAlpha = 0.45 * aparecer
+    ctx.strokeStyle = "#c9b6ff"
+    ctx.lineWidth = 1
+    ctx.setLineDash([1.5, 7])
+    giros = [(0, 0, 0.44, 1), (-0.3, 0.22, 0.24, -1), (0.32, 0.2, 0.24, 1), (0, 0.42, 0.26, -1), (-0.38, -0.12, 0.18, 1)]
+    for dx, dy, r, sentido in giros:
+        ctx.lineDashOffset = sentido * T * 9
+        ctx.beginPath()
+        ctx.arc(cx + dx * S, cy + dy * S, r * S, 0, TAU)
+        ctx.stroke()
+    ctx.restore()
+
+
+def cielo(T):
+    ctx.fillStyle = "#e9dcff"
+    for x, y, r, fase, vel in estrellas:
+        ctx.globalAlpha = 0.25 + 0.35 * (0.5 + 0.5 * math.sin(T * vel + fase))
+        ctx.fillRect(x, y, r, r)
+    ctx.globalAlpha = 1
+    # halo magenta detrás de la flor
+    cx, cy, S = P["cx"], P["cy"], P["S"]
+    halo = ctx.createRadialGradient(cx, cy, 0, cx, cy, S * 0.4)
+    halo.addColorStop(0, "rgba(255,111,210,0.20)")
+    halo.addColorStop(1, "rgba(255,111,210,0)")
+    ctx.fillStyle = halo
+    ctx.globalAlpha = min(1.0, max(0.0, (T - 2.0) / 2.0))
+    ctx.fillRect(0, 0, P["W"], P["H"])
+    ctx.globalAlpha = 1
+
+
+def particulas_en_camino(T):
+    for grupo in estado["lista"]:
+        ctx.fillStyle = grupo[0]
+        for p in grupo[2]:
+            k = (T - p[4]) / DURACION
+            if k <= 0:
+                continue
+            if k >= 1:
+                ctx.fillRect(p[0], p[1], p[5], p[5])
+            else:
+                e = 1 - (1 - k) ** 3
+                ctx.fillRect(p[2] + (p[0] - p[2]) * e, p[3] + (p[1] - p[3]) * e, p[5], p[5])
+
+
+def polen(dt, T):
+    if reducir:
+        return
+    if len(polen_flotante) < 40 and random.random() < dt * 6:
+        polen_flotante.append([P["cx"] + random.uniform(-P["S"] * 0.2, P["S"] * 0.2),
+                               P["cy"] - random.uniform(0, P["S"] * 0.12), random.uniform(0, TAU), 0.0])
+    ctx.fillStyle = "#ffc46b"
+    for p in polen_flotante:
+        p[3] += dt
+        p[1] -= 14 * dt
+        p[0] += math.sin(T * 1.3 + p[2]) * 10 * dt
+        ctx.globalAlpha = max(0.0, 1 - p[3] / 5)
+        ctx.fillRect(p[0], p[1], 1.6, 1.6)
+    ctx.globalAlpha = 1
+    polen_flotante[:] = [p for p in polen_flotante if p[3] < 5]
+
+
+def cuadro(ts):
+    if estado["ultimo"] is None:
+        estado["ultimo"] = ts
+    dt = min((ts - estado["ultimo"]) / 1000, 0.05)
+    estado["ultimo"] = ts
+    estado["T"] += dt
+    T = estado["T"]
+
+    ctx.setTransform(P["dpr"], 0, 0, P["dpr"], 0, 0)
+    ctx.clearRect(0, 0, P["W"], P["H"])
+    ctx.globalCompositeOperation = "source-over"
+    cielo(T)
+    circulos(T)
+
+    ctx.save()
+    ctx.globalCompositeOperation = "lighter"
+    balanceo(T)
+    if T < estado["fin"]:
+        particulas_en_camino(T)
+    else:
+        if estado["cache"] is None:
+            hornear()
+        for d, capa in enumerate(estado["cache"]):
+            ctx.globalAlpha = 0.72 + 0.28 * math.sin(T * 2.2 + d * 2.1)
+            ctx.drawImage(capa, 0, 0, P["W"], P["H"])
+        ctx.globalAlpha = 1
+        polen(dt, T)
+    ctx.restore()
+
+    timer.request_animation_frame(cuadro)
+
+
+
+# --- arranque ---
+ajustar()
+window.addEventListener("resize", ajustar)
+lienzo.bind("click", reiniciar)
+timer.request_animation_frame(cuadro)
+
+window.pyListo = True
+</script>
+
+<script>
+  window.addEventListener("load", function () {
+    setTimeout(function () {
+      if (!window.pyListo && window.brython) {
+        try { window.brython(); } catch (e) { console.error(e); }
+      }
+    }, 300);
+  });
+</script>
+</body>
+</html>
